@@ -1,0 +1,190 @@
+#include <WiFi.h>
+#include "DHT.h"
+#include "ThingSpeak.h"
+
+// ================= WIFI =================
+const char* ssid = "";
+const char* password = "";
+
+// ================= THINGSPEAK =================
+unsigned long channelID = 3230668;
+const char* writeAPIKey = "774V7AWN8PQQEI5B";
+
+// ================= PINS =================
+#define DHTPIN 2
+#define DHTTYPE DHT11
+#define LED_PIN 5
+#define BUZZER_PIN 18
+
+#define PH_PIN 1
+#define TURBIDITY_PIN 6
+
+DHT dht(DHTPIN, DHTTYPE);
+WiFiClient client;
+
+// ================= TIMING =================
+unsigned long lastUpload = 0;
+const unsigned long uploadInterval = 20000;   // 20 seconds
+
+// ================= PH FUNCTION =================
+float readPH() {
+
+  static float filteredPH = 7.0;
+  static float lastVoltage = 0;
+  static int stableCount = 0;
+
+  int samples[15];
+
+  for(int i=0;i<15;i++){
+    samples[i] = analogRead(PH_PIN);
+    delay(20);
+  }
+
+  // sort samples
+  for(int i=0;i<14;i++){
+    for(int j=i+1;j<15;j++){
+      if(samples[j] < samples[i]){
+        int temp = samples[i];
+        samples[i] = samples[j];
+        samples[j] = temp;
+      }
+    }
+  }
+
+  float avg = 0;
+  for(int i=5;i<10;i++){
+    avg += samples[i];
+  }
+  avg /= 5;
+
+  float voltage = avg * (3.3 / 4095.0);
+
+  Serial.print("pH Voltage: ");
+  Serial.println(voltage,3);
+
+  float rawPH = 7 + ((1.0 - voltage) / 0.18) ;
+
+  rawPH = round(rawPH * 10.0) / 10.0;
+
+  
+
+  return rawPH;
+}
+
+// ================= TURBIDITY FUNCTION =================
+float readTurbidity() {
+
+  int sensorValue = analogRead(TURBIDITY_PIN);
+  float voltage = sensorValue * (3.3 / 4095.0);
+
+  Serial.print("Turbidity Voltage: ");
+  Serial.println(voltage);
+
+  float turbidity;
+
+  if (voltage < 1.5)
+    turbidity = 3000;
+  else
+    turbidity = -162.22*voltage+543.33;
+
+  return turbidity;
+}
+
+// ================= WIFI CONNECT =================
+void connectWiFi() {
+
+  if (WiFi.status() == WL_CONNECTED) return;
+
+  Serial.print("Connecting to WiFi");
+
+  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("\nWiFi Connected");
+}
+
+// ================= SETUP =================
+void setup() {
+
+  Serial.begin(115200);
+
+  pinMode(LED_PIN, OUTPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
+  pinMode(PH_PIN, INPUT);
+  pinMode(TURBIDITY_PIN, INPUT);
+
+  dht.begin();
+
+  analogReadResolution(12);
+  analogSetAttenuation(ADC_11db);
+
+  connectWiFi();
+
+  ThingSpeak.begin(client);
+
+  Serial.println("System Started");
+}
+
+// ================= LOOP =================
+void loop() {
+
+  connectWiFi();
+
+  float humidity = dht.readHumidity();
+  float temperature = dht.readTemperature();
+  float phValue = readPH();
+  float turbidity = readTurbidity();
+
+  if (isnan(humidity) || isnan(temperature)) {
+    Serial.println("DHT read failed");
+    delay(2000);
+    return;
+  }
+
+  Serial.println("---------------");
+  Serial.print("Temp: ");
+  Serial.print(temperature);
+  Serial.print(" °C | Hum: ");
+  Serial.print(humidity);
+  Serial.print(" % | pH: ");
+  Serial.print(phValue);
+  Serial.print(" | Turbidity: ");
+  Serial.println(turbidity);
+
+  // ===== ALERT LOGIC =====
+  if (temperature > 32 || humidity > 85 || phValue < 6 || phValue > 8 || turbidity > 1000) {
+    digitalWrite(LED_PIN, HIGH);
+    digitalWrite(BUZZER_PIN, HIGH);
+  } 
+  else {
+    digitalWrite(LED_PIN, LOW);
+    digitalWrite(BUZZER_PIN, LOW);
+  }
+
+  // ===== SEND DATA EVERY 20s =====
+  if (millis() - lastUpload >= uploadInterval) {
+
+    ThingSpeak.setField(1, temperature);
+    ThingSpeak.setField(2, humidity);
+    ThingSpeak.setField(3, phValue);
+    ThingSpeak.setField(4, turbidity);
+
+    int status = ThingSpeak.writeFields(channelID, writeAPIKey);
+
+    if (status == 200) {
+      Serial.println("Data sent to ThingSpeak");
+    } 
+    else {
+      Serial.print("ThingSpeak Error: ");
+      Serial.println(status);
+    }
+
+    lastUpload = millis();
+  }
+
+  delay(2000);
+}
